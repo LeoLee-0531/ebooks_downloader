@@ -1,6 +1,6 @@
 import requests
 import os
-from utils import format_page_number, ensure_dir, load_env, load_cookies
+from .utils import format_page_number, ensure_dir, load_env, load_cookies
 
 
 def download_chapter_images(chapter_name, start_page, next_chapter_start, output_dir='output'):
