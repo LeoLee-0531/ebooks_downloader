@@ -18,7 +18,7 @@
       if (existing && existing[0].length >= fullUrl.length) return;
       if (existing) delete current[existing[0]];
       current[fullUrl] = page;
-      chrome.storage.session.set({ capturedImages: current });
+      chrome.storage.session.set({ capturedImages: current }).catch(() => {});
     });
   }
 
@@ -86,7 +86,7 @@
       if (!e.data?.__ext) return;
       if (e.data.__ext === 'url') saveUrl(e.data.url, e.data.page);
       if (e.data.__ext === 'toc') {
-        chrome.storage.session.set({ tocNodes: e.data.nodes });
+        chrome.storage.session.set({ tocNodes: e.data.nodes }).catch(() => {});
       }
     });
   }
@@ -95,7 +95,7 @@
   if (isTop) {
     const bookId = new URLSearchParams(window.location.search).get('book_uni_id');
     if (bookId) {
-      chrome.storage.session.set({ bookUniId: bookId });
+      chrome.storage.session.set({ bookUniId: bookId }).catch(() => {});
       fetchBookApis(bookId);
     }
   }
@@ -115,7 +115,7 @@
         const m = info.last_loc.match(/\[p-(\d+)\]/);
         if (m) update.estimatedTotal = Math.round(parseInt(m[1], 10) / (info.percent / 100));
       }
-      if (Object.keys(update).length) chrome.storage.session.set(update);
+      if (Object.keys(update).length) chrome.storage.session.set(update).catch(() => {});
     } catch (_) {}
 
     try {
@@ -128,7 +128,7 @@
         chrome.storage.session.set({
           downloadLink: data.download_link,
           downloadToken: data.download_token,
-        });
+        }).catch(() => {});
       }
     } catch (_) {}
   }
@@ -170,7 +170,7 @@
       }));
 
       if (isTop) {
-        chrome.storage.session.set({ tocNodes: nodes });
+        chrome.storage.session.set({ tocNodes: nodes }).catch(() => {});
       } else {
         try { window.top.postMessage({ __ext: 'toc', nodes }, '*'); } catch (_) {}
       }
