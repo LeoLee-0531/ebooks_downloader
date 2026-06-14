@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "博客來電子書下載工具",
+  "version": "1.0.0",
+  "description": "在博客來電子書閱讀器一鍵下載並合併成 PDF，無需安裝其他工具",
+  "permissions": ["sidePanel", "downloads", "storage"],
+  "host_permissions": [
+    "*://*.books.com.tw/*",
+    "*://streaming-ebook.books.com.tw/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.books.com.tw/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "博客來電子書下載工具",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
