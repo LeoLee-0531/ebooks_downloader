@@ -7,78 +7,63 @@
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
-  <header>
-    <h1>📚 電子書下載工具</h1>
-  </header>
-
-  <!-- 偵測狀態 -->
-  <section class="card">
-    <div class="detect-row">
-      <span class="count" id="img-count">0</span>
-      <span>頁已偵測</span>
+  <div id="panel">
+    <div class="bk-head">
+      <span class="bk-head-ic"></span>
+      <h3>電子書下載</h3>
     </div>
-    <div class="dom-range" id="dom-range" hidden></div>
-    <div class="api-badge" id="api-badge" hidden>✓ API 已自動取得書名與總頁數</div>
-    <p class="hint" id="detect-hint">請開啟博客來電子書閱讀器並翻幾頁…</p>
-    <div id="template-wrap" hidden>
-      <div class="template-box" id="template-display"></div>
-    </div>
-  </section>
 
-  <!-- 模式切換 -->
-  <div class="tabs">
-    <button class="tab active" data-tab="whole">整本下載</button>
-    <button class="tab" data-tab="chapter">分章節下載</button>
+    <div class="bk-switch" id="bk-switch" data-active="0">
+      <span class="bk-switch-thumb"></span>
+      <button class="bk-seg active" data-tab="whole">整本下載</button>
+      <button class="bk-seg" data-tab="chapter">分章節下載</button>
+    </div>
+
+    <div class="bk-sec active" id="bk-sec-whole">
+      <div class="bk-field">
+        <div class="bk-flabel">書名（檔名）</div>
+        <input class="bk-finput" id="bk-whole-title" placeholder="書名">
+      </div>
+      <div class="bk-field">
+        <div class="bk-flabel">結束頁（書本總頁數）</div>
+        <input class="bk-finput" id="bk-whole-end" type="number" min="1" placeholder="留空 = 自動下載至結尾">
+        <div class="bk-end-hint" id="bk-whole-end-hint"></div>
+      </div>
+      <button class="bk-btn bk-primary" id="bk-whole-btn"></button>
+    </div>
+
+    <div class="bk-sec" id="bk-sec-chapter">
+      <p class="bk-hint" id="bk-toc-hint">請在閱讀器點開「目錄」面板，目錄將自動載入。</p>
+      <div id="bk-toc-wrap" style="display:none">
+        <div class="bk-toc-actions">
+          <button class="bk-mini" id="bk-toc-all">全選</button>
+          <button class="bk-mini" id="bk-toc-none">全不選</button>
+          <button class="bk-mini" id="bk-toc-top">只選最上層</button>
+          <button class="bk-mini" id="bk-toc-collapse">全部收合</button>
+          <span class="bk-toc-selinfo">已選 <b id="bk-toc-count">0</b></span>
+        </div>
+        <div id="bk-toc-tree" class="bk-toc-tree"></div>
+        <button class="bk-btn bk-primary" id="bk-dl-selected"></button>
+      </div>
+      <details class="bk-adv">
+        <summary>進階：手動輸入頁碼範圍</summary>
+        <table>
+          <thead id="bk-thead" style="display:none">
+            <tr><th>名稱</th><th>起始頁</th><th>結束頁</th><th></th></tr>
+          </thead>
+          <tbody id="bk-tbody"></tbody>
+        </table>
+        <button class="bk-btn bk-secondary" id="bk-add"></button>
+        <button class="bk-btn bk-primary" id="bk-chapter-btn" style="margin-top:8px"></button>
+      </details>
+    </div>
+
+    <div id="bk-progress" style="display:none">
+      <div class="bk-progress-bar"><div id="bk-bar"></div></div>
+      <div id="bk-status"></div>
+    </div>
+    <div id="bk-log"></div>
   </div>
-
-  <!-- 整本下載 -->
-  <section class="card" id="tab-whole">
-    <h2>整本下載</h2>
-    <p class="hint">一次下載全書為單一 PDF。</p>
-    <label>書名（檔名）
-      <input type="text" id="whole-title" placeholder="書名">
-    </label>
-    <label>結束頁（選填，留空自動下載至結尾）
-      <input type="number" id="whole-end" min="1" placeholder="留空 = 自動偵測">
-    </label>
-    <p class="hint" id="whole-end-hint" hidden></p>
-    <button class="primary" id="whole-dl-btn" style="margin-top:10px">下載整本 PDF</button>
-  </section>
-
-  <!-- 分章節下載 -->
-  <section class="card" id="tab-chapter" hidden>
-    <h2>章節設定</h2>
-    <div class="toc-badge" id="toc-badge" hidden>✓ 目錄已自動載入</div>
-    <p class="hint">填入每個章節的名稱與頁碼範圍，每章各下載一個 PDF。</p>
-    <table id="chapters-table">
-      <thead>
-        <tr><th>章節名稱</th><th>起始頁</th><th>結束頁</th><th></th></tr>
-      </thead>
-      <tbody id="chapters-body"></tbody>
-    </table>
-    <button class="secondary" id="add-btn">+ 新增章節</button>
-    <button class="primary" id="chapter-dl-btn" style="margin-top:10px">下載各章節 PDF</button>
-  </section>
-
-  <!-- 進度與日誌 -->
-  <section class="card" id="progress-card" hidden>
-    <div class="progress-wrap">
-      <div class="progress-bar" id="progress-bar"></div>
-    </div>
-    <div class="log" id="log"></div>
-    <ul class="pdf-list" id="pdf-list"></ul>
-  </section>
-
-  <!-- 臨時 debug 區塊，確認問題後刪除 -->
-  <section class="card" style="margin-top:8px">
-    <button onclick="
-      chrome.storage.session.get(['bookChapters','downloadLink','downloadToken','bookTitle','estimatedTotal'], d => {
-        document.getElementById('dbg').textContent = JSON.stringify(d, null, 2);
-      })
-    " style="font-size:11px;padding:4px 8px;background:#2a2f3a;color:#9aa3b2;border:1px solid #3a4050;border-radius:5px;cursor:pointer">🔍 Debug: 顯示 Session Storage</button>
-    <pre id="dbg" style="font-size:10px;color:#ffcf6b;white-space:pre-wrap;word-break:break-all;margin-top:6px;max-height:200px;overflow-y:auto"></pre>
-  </section>
-
   <script src="lib/pdf-lib.min.js"></script>
   <script src="sidepanel.js"></script>
 </body>

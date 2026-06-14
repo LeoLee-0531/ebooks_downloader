@@ -3,7 +3,7 @@
   "name": "博客來電子書下載工具",
   "version": "1.0.0",
   "description": "在博客來電子書閱讀器一鍵下載並合併成 PDF，無需安裝其他工具",
-  "permissions": ["sidePanel", "downloads", "storage"],
+  "permissions": ["sidePanel", "downloads", "storage", "tabs"],
   "host_permissions": [
     "*://*.books.com.tw/*",
     "*://streaming-ebook.books.com.tw/*"

@@ -1,19 +1,42 @@
+'use strict';
+
 const { PDFDocument } = PDFLib;
 
 // ---------- 工具函式 ----------
-function buildTemplate(sampleUrl) {
-  return sampleUrl.replace(/\/i-\d+\.jpg/, '/i-{page}.jpg');
-}
+function buildTemplate(sampleUrl) { return sampleUrl.replace(/\/i-\d+\.jpg/, '/i-{page}.jpg'); }
 function formatPage(n) { return String(n).padStart(3, '0'); }
 function getPageUrl(template, n) { return template.replace('{page}', formatPage(n)); }
 
+function sanitizeName(s) {
+  return (s || '').replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'chapter';
+}
+
+// ---------- 圖示（Lucide 風格 inline SVG）----------
+function icon(name, size = 20) {
+  const paths = {
+    book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+    close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+    chevronRight: '<path d="m9 18 6-6-6-6"/>',
+    chevronDown: '<path d="m6 9 6 6 6-6"/>',
+    plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+  };
+  return `<svg class="bk-ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ''}</svg>`;
+}
+
 // ---------- 狀態 ----------
-let capturedImages = {};
+let capturedImages = {};       // url → pageNum
 let downloadLink = null;
 let downloadToken = null;
-let resolvedTemplate = null; // 探測後確認可用的 template
+let resolvedTemplate = null;
+let bookTitle = null;
+let tocNodes = [];             // [{idx, name, indent, level}] — serializable, no DOM refs
+const tocCollapsed = new Set();
+const tocSelected = new Set();
+let detectingPages = false;
 
-// 候選 template（依可信度排序）：已掃描到的真實 URL > API item/ > API root
+// ---------- Template 候選 ----------
 function templateCandidates() {
   const list = [];
   const urls = Object.keys(capturedImages);
@@ -27,8 +50,15 @@ function templateCandidates() {
   return [...new Set(list)];
 }
 
-// 找出可用的 template（快取）
-// DOM 掃描到的 URL 必然可用，直接採用；否則才探測 API 候選
+async function pageExists(url) {
+  try {
+    const r = await fetch(url);
+    return r.status === 200;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveTemplate(probePage = 1) {
   if (resolvedTemplate) return resolvedTemplate;
   const capturedUrls = Object.keys(capturedImages);
@@ -45,222 +75,267 @@ async function resolveTemplate(probePage = 1) {
   return null;
 }
 
-// ---------- UI 更新 ----------
-function updateDetection(images) {
-  capturedImages = images || {};
-  const count = Object.keys(capturedImages).length;
-  document.getElementById('img-count').textContent = count;
-
-  const hint = document.getElementById('detect-hint');
-  const domRangeEl = document.getElementById('dom-range');
-  if (count === 0) {
-    hint.textContent = '請開啟博客來電子書閱讀器並翻幾頁…';
-    hint.hidden = false;
-    if (domRangeEl) domRangeEl.hidden = true;
-    return;
+// ---------- TOC 樹狀輔助 ----------
+function nodePath(i) {
+  const chain = [tocNodes[i].name];
+  let ind = tocNodes[i].indent;
+  for (let j = i - 1; j >= 0; j--) {
+    if (tocNodes[j].indent < ind) {
+      chain.unshift(tocNodes[j].name);
+      ind = tocNodes[j].indent;
+    }
   }
-  const pages = Object.values(capturedImages);
-  if (domRangeEl) {
-    domRangeEl.textContent = `DOM 掃描：第 ${Math.min(...pages)}～${Math.max(...pages)} 頁`;
-    domRangeEl.hidden = false;
+  return chain.map(sanitizeName).join('/');
+}
+
+function subtreeEnd(i) {
+  const ind = tocNodes[i].indent;
+  let j = i + 1;
+  while (j < tocNodes.length && tocNodes[j].indent > ind) j++;
+  return j;
+}
+
+function isParentNode(i) {
+  return i + 1 < tocNodes.length && tocNodes[i + 1].indent > tocNodes[i].indent;
+}
+
+function isHidden(i) {
+  for (const c of tocCollapsed) {
+    if (i > c && i < subtreeEnd(c)) return true;
   }
-  hint.textContent = '翻更多頁可取得更完整範圍。';
-  hint.hidden = false;
+  return false;
 }
 
-function applyDownloadInfo(link, token) {
-  downloadLink = link;
-  downloadToken = token;
-  document.getElementById('api-badge').hidden = false;
-  // 探測可用 template，再 binary search 找末頁
-  detectTotalPages();
+function renderTocTree() {
+  const box = document.getElementById('bk-toc-tree');
+  if (!box) return;
+  box.innerHTML = '';
+  tocNodes.forEach((n, i) => {
+    if (isHidden(i)) return;
+    const row = document.createElement('div');
+    row.className = 'bk-toc-row';
+    row.style.paddingLeft = (n.level * 14) + 'px';
+
+    const tgl = document.createElement('span');
+    tgl.className = 'bk-toc-tgl';
+    if (isParentNode(i)) {
+      tgl.innerHTML = icon(tocCollapsed.has(i) ? 'chevronRight' : 'chevronDown', 14);
+      tgl.classList.add('bk-toc-tgl-on');
+      tgl.addEventListener('click', () => {
+        if (tocCollapsed.has(i)) tocCollapsed.delete(i); else tocCollapsed.add(i);
+        renderTocTree();
+      });
+    }
+
+    const cbWrap = document.createElement('label');
+    cbWrap.className = 'bk-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = tocSelected.has(i);
+    cb.addEventListener('change', () => {
+      if (cb.checked) tocSelected.add(i); else tocSelected.delete(i);
+      updateSelectedCount();
+    });
+    const box2 = document.createElement('span');
+    box2.className = 'bk-check-box';
+    box2.innerHTML = icon('check', 12);
+    cbWrap.append(cb, box2);
+
+    const lbl = document.createElement('span');
+    lbl.className = 'bk-toc-name';
+    lbl.textContent = n.name;
+    lbl.addEventListener('click', () => { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); });
+
+    row.append(tgl, cbWrap, lbl);
+    box.appendChild(row);
+  });
+  updateSelectedCount();
 }
 
-function applyBookTitle(title) {
-  const el = document.getElementById('whole-title');
-  if (el && !el.dataset.userEdited) el.value = title;
+function updateSelectedCount() {
+  const el = document.getElementById('bk-toc-count');
+  if (el) el.textContent = tocSelected.size;
 }
 
-function setWholePagesHint(text) {
-  const el = document.getElementById('whole-end-hint');
-  if (el) { el.textContent = text; el.hidden = false; }
+function applyTocNodes(nodes) {
+  tocNodes = nodes || [];
+  tocCollapsed.clear();
+  tocSelected.clear();
+  document.getElementById('bk-toc-wrap').style.display = '';
+  document.getElementById('bk-toc-hint').style.display = 'none';
+  renderTocTree();
 }
 
-// ---------- Binary search 找末頁（GET，不用 Range）----------
-async function pageExists(url) {
+// ---------- Page detection via content script ----------
+async function detectPagesViaContentScript(indices) {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs[0]) throw new Error('找不到閱讀器分頁');
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabs[0].id, { type: 'DETECT_PAGES', indices }, (res) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(res?.pages || {});
+    });
+  });
+}
+
+// ---------- 下載所選章節 ----------
+async function downloadSelectedToc() {
+  const sel = [...tocSelected].sort((a, b) => a - b);
+  if (sel.length === 0) throw new Error('尚未勾選任何章節');
+
+  // Indices needed: each selected node + the boundary node after its subtree
+  const need = new Set();
+  sel.forEach(i => { need.add(i); const e = subtreeEnd(i); if (e < tocNodes.length) need.add(e); });
+  const sortedNeed = [...need].sort((a, b) => a - b);
+
+  setStatus(`偵測頁碼 0/${sortedNeed.length}…`);
+  setProgress(null);
+
+  const pagesMap = await detectPagesViaContentScript(sortedNeed);
+
+  const chapters = sel.map(i => {
+    const e = subtreeEnd(i);
+    const start = pagesMap[i];
+    const endPage = (e < tocNodes.length && pagesMap[e] != null) ? pagesMap[e] - 1 : NaN;
+    return { name: nodePath(i), start, end: endPage };
+  }).filter(c => Number.isFinite(c.start));
+
+  if (chapters.length === 0) throw new Error('無法取得所選章節的頁碼');
+  await downloadChapters(chapters);
+}
+
+// ---------- 進度 UI ----------
+function appendLog(text, cls = '') {
+  const log = document.getElementById('bk-log');
+  if (!log) return;
+  const div = document.createElement('div');
+  div.className = 'bk-line ' + cls;
+  const ic = cls === 'bk-ok' ? icon('check', 14) : cls === 'bk-err' ? icon('close', 14) : '';
+  div.innerHTML = ic + '<span></span>';
+  div.querySelector('span').textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setStatus(text) {
+  const el = document.getElementById('bk-status');
+  if (el) el.textContent = text || '';
+}
+
+function setProgress(ratio) {
+  const bar = document.getElementById('bk-bar');
+  const wrap = document.getElementById('bk-progress');
+  if (!bar) return;
+  if (ratio == null) {
+    if (wrap) wrap.classList.add('bk-indet');
+    bar.style.width = '40%';
+  } else {
+    if (wrap) wrap.classList.remove('bk-indet');
+    bar.style.width = `${Math.round(ratio * 100)}%`;
+  }
+}
+
+async function withProgress(btn, fn) {
+  const prog = document.getElementById('bk-progress');
+  if (btn) btn.style.display = 'none';
+  if (prog) prog.style.display = 'block';
+  setProgress(null);
+  setStatus('準備中…');
   try {
-    const r = await fetch(url);
-    return r.status === 200;
-  } catch {
-    return false;
+    await fn();
+  } catch (e) {
+    setStatus('✗ ' + (e && e.message ? e.message : '發生錯誤'));
+    await new Promise(r => setTimeout(r, 1500));
+  } finally {
+    if (prog) prog.style.display = 'none';
+    setProgress(0);
+    setStatus('');
+    if (btn) btn.style.display = '';
   }
 }
 
-let detectingPages = false;
+// ---------- 章節表格 ----------
+function addChapterRow(name = '', start = '', end = '') {
+  const tbody = document.getElementById('bk-tbody');
+  if (!tbody) return;
+  const tr = document.createElement('tr');
+  tr.innerHTML =
+    `<td><input class="bk-in bk-name" value="${name}" placeholder="章節名"></td>` +
+    `<td><input class="bk-in bk-start" type="number" value="${start}" placeholder="1" min="1"></td>` +
+    `<td><input class="bk-in bk-end" type="number" value="${end}" placeholder="50" min="1"></td>` +
+    `<td><button class="bk-del" title="刪除">${icon('close', 16)}</button></td>`;
+  tr.querySelector('.bk-del').addEventListener('click', () => { tr.remove(); updateChapterThead(); });
+  tbody.appendChild(tr);
+  updateChapterThead();
+}
+
+function updateChapterThead() {
+  const thead = document.getElementById('bk-thead');
+  const tbody = document.getElementById('bk-tbody');
+  if (thead && tbody) thead.style.display = tbody.children.length ? '' : 'none';
+}
+
+// ---------- 偵測總頁數 ----------
 async function detectTotalPages() {
   if (detectingPages) return;
   detectingPages = true;
-  setWholePagesHint('自動偵測中…');
+
+  const hintEl = document.getElementById('bk-whole-end-hint');
+  if (hintEl) { hintEl.textContent = '自動偵測中…'; hintEl.style.display = 'block'; }
+
   try {
     const template = await resolveTemplate();
     if (!template) {
-      setWholePagesHint('無法存取圖片，可改用「分章節」手動填頁碼，或留空嘗試');
+      if (hintEl) { hintEl.textContent = '偵測失敗，請手動輸入'; hintEl.style.display = 'block'; }
       return;
     }
-    // 顯示確認可用的 template
-    const display = template.replace(/DownloadToken=\S{20}.*$/, 'DownloadToken=…');
-    document.getElementById('template-display').textContent = display;
-    document.getElementById('template-wrap').hidden = false;
-
     let low = 1, high = 9999;
     while (low < high) {
       const mid = Math.floor((low + high + 1) / 2);
       if (await pageExists(getPageUrl(template, mid))) low = mid;
       else high = mid - 1;
     }
-    const endInput = document.getElementById('whole-end');
-    if (endInput && !endInput.dataset.userEdited) endInput.value = low;
-    setWholePagesHint(`自動偵測：共 ${low} 頁`);
-  } catch {
-    setWholePagesHint('偵測失敗，請手動輸入或留空（留空將下載至結尾）');
+    setUI('bk-whole-end', String(low));
+    if (hintEl) { hintEl.textContent = `自動偵測：共 ${low} 頁`; hintEl.style.display = 'block'; }
+  } catch (_) {
+    if (hintEl) { hintEl.textContent = '偵測失敗，請手動輸入'; hintEl.style.display = 'block'; }
   } finally {
     detectingPages = false;
   }
 }
 
-// ---------- 章節自動填入 ----------
-let chaptersAutoFilled = false;
-
-function applyBookChapters(chapters) {
-  if (!chapters?.length || chaptersAutoFilled) return;
-  chaptersAutoFilled = true;
-  const tbody = document.getElementById('chapters-body');
-  tbody.innerHTML = '';
-  chapters.forEach((ch, i) => {
-    const endPage = i + 1 < chapters.length ? chapters[i + 1].startPage - 1 : '';
-    addChapterRow(ch.name, ch.startPage, endPage);
-  });
-  document.getElementById('toc-badge').hidden = false;
+function setUI(id, value) {
+  const el = document.getElementById(id);
+  if (el && !el.dataset.userEdited) el.value = value;
 }
 
-// ---------- Session storage ----------
-chrome.storage.session.get(
-  ['capturedImages', 'bookTitle', 'downloadLink', 'downloadToken', 'estimatedTotal', 'bookChapters'],
-  (data) => {
-    updateDetection(data.capturedImages);
-    if (data.bookTitle) applyBookTitle(data.bookTitle);
-    if (data.estimatedTotal) {
-      setWholePagesHint(`依閱讀進度估算：約 ${data.estimatedTotal} 頁`);
-    }
-    if (data.downloadLink && data.downloadToken) {
-      applyDownloadInfo(data.downloadLink, data.downloadToken);
-    }
-    if (data.bookChapters) applyBookChapters(data.bookChapters);
+// ---------- 核心下載 ----------
+async function downloadChapters(chapters, filenameOverride = null, folder = undefined) {
+  if (chapters.length === 0) {
+    appendLog('請填寫至少一個章節的起始與結束頁。', 'bk-err');
+    return;
   }
-);
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'session') return;
-  if (changes.capturedImages) updateDetection(changes.capturedImages.newValue);
-  if (changes.bookTitle) applyBookTitle(changes.bookTitle.newValue);
-  if (changes.estimatedTotal && !document.getElementById('whole-end')?.dataset.userEdited) {
-    setWholePagesHint(`依閱讀進度估算：約 ${changes.estimatedTotal.newValue} 頁`);
-  }
-  if (changes.downloadLink || changes.downloadToken) {
-    const link = changes.downloadLink?.newValue || downloadLink;
-    const token = changes.downloadToken?.newValue || downloadToken;
-    if (link && token && !downloadLink) applyDownloadInfo(link, token);
-  }
-  if (changes.bookChapters) applyBookChapters(changes.bookChapters.newValue);
-});
-
-// ---------- Mark user edits ----------
-['whole-title', 'whole-end'].forEach(id => {
-  document.addEventListener('input', (e) => {
-    if (e.target.id === id) e.target.dataset.userEdited = '1';
-  });
-});
-
-// ---------- Tab 切換 ----------
-document.querySelectorAll('.tab').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const tab = btn.dataset.tab;
-    document.getElementById('tab-whole').hidden = tab !== 'whole';
-    document.getElementById('tab-chapter').hidden = tab !== 'chapter';
-  });
-});
-
-// ---------- 章節表格 ----------
-function addChapterRow(name = '', start = '', end = '') {
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td><input class="ch-name" type="text" value="${name}" placeholder="chapter1"></td>
-    <td><input class="ch-start" type="number" value="${start}" min="1" placeholder="1"></td>
-    <td><input class="ch-end" type="number" value="${end}" min="1" placeholder="50"></td>
-    <td><button class="row-del">✕</button></td>`;
-  tr.querySelector('.row-del').addEventListener('click', () => tr.remove());
-  document.getElementById('chapters-body').appendChild(tr);
-}
-
-document.getElementById('add-btn').addEventListener('click', () => addChapterRow());
-// 預設列：只有在目錄尚未自動填入時才加入
-if (!chaptersAutoFilled) addChapterRow('chapter1', '', '');
-
-function collectChapters() {
-  return Array.from(document.querySelectorAll('#chapters-body tr')).map((tr, i) => ({
-    name: tr.querySelector('.ch-name').value.trim() || `chapter${i + 1}`,
-    start: parseInt(tr.querySelector('.ch-start').value, 10),
-    end: parseInt(tr.querySelector('.ch-end').value, 10),
-  })).filter(ch => !isNaN(ch.start) && !isNaN(ch.end) && ch.end >= ch.start);
-}
-
-// ---------- 進度 ----------
-function appendLog(text, cls = '') {
-  const log = document.getElementById('log');
-  const div = document.createElement('div');
-  div.className = 'line ' + cls;
-  div.textContent = text;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-
-function setProgress(ratio) {
-  document.getElementById('progress-bar').style.width = `${Math.min(100, Math.round(ratio * 100))}%`;
-}
-
-// ---------- 核心下載（有末頁 → 固定範圍；無末頁 → 下載到 404 為止）----------
-async function downloadChapters(chapters, filenameOverride = null) {
   if (templateCandidates().length === 0) {
-    appendLog('尚未取得圖片網址，請稍候 API 偵測或翻幾頁書本。', 'err');
+    appendLog('尚未取得圖片網址，請等候 API 偵測或翻幾頁後再試。', 'bk-err');
     return;
   }
-  const template = await resolveTemplate(chapters[0]?.start || 1);
+  const template = await resolveTemplate(chapters[0].start || 1);
   if (!template) {
-    appendLog('無法存取任何圖片頁，請確認登入狀態或書本是否有閱讀權限。', 'err');
+    appendLog('無法存取任何圖片頁，請確認登入狀態或閱讀權限。', 'bk-err');
     return;
   }
 
-  document.getElementById('progress-card').hidden = false;
-  document.getElementById('log').innerHTML = '';
-  document.getElementById('pdf-list').innerHTML = '';
-  setProgress(0);
+  document.getElementById('bk-log').innerHTML = '';
+  const hasFixedEnd = chapters.every(c => !isNaN(c.end));
+  const totalPages = hasFixedEnd ? chapters.reduce((s, c) => s + (c.end - c.start + 1), 0) : 0;
+  const MAX_MISS = 2;
+  let done = 0;
+  let okCount = 0;
 
-  const hasFixedEnd = chapters.every(ch => !isNaN(ch.end));
-  const totalPages = hasFixedEnd
-    ? chapters.reduce((sum, ch) => sum + (ch.end - ch.start + 1), 0)
-    : 0;
-  let donePages = 0;
-
-  const MAX_MISS = 2; // 留空模式：連續 miss 幾次才視為書本結尾
-
-  for (const ch of chapters) {
+  for (let ci = 0; ci < chapters.length; ci++) {
+    const ch = chapters[ci];
+    const shortName = String(ch.name).split('/').pop();
     const fixedEnd = !isNaN(ch.end);
-    appendLog(fixedEnd
-      ? `▶ ${ch.name}（第 ${ch.start}～${ch.end} 頁）`
-      : `▶ ${ch.name}（第 ${ch.start} 頁起，自動偵測結尾）`);
-
     const pdfDoc = await PDFDocument.create();
     let errors = 0;
     let added = 0;
@@ -269,41 +344,37 @@ async function downloadChapters(chapters, filenameOverride = null) {
 
     while (true) {
       if (fixedEnd && page > ch.end) break;
-
-      const url = getPageUrl(template, page);
       let ok = false;
       try {
-        const resp = await fetch(url);
+        const resp = await fetch(getPageUrl(template, page));
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const bytes = await resp.arrayBuffer();
         const img = await pdfDoc.embedJpg(bytes);
-        const pdfPage = pdfDoc.addPage([img.width, img.height]);
-        pdfPage.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+        const p = pdfDoc.addPage([img.width, img.height]);
+        p.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
         ok = true;
         added++;
       } catch (e) {
-        if (fixedEnd) {
-          appendLog(`  ✗ 頁 ${page}：${e.message}`, 'err');
-          errors++;
-        } else {
+        if (fixedEnd) { errors++; }
+        else {
           consecutiveMiss++;
-          // 還沒下載到任何一頁時，要把失敗顯示出來方便診斷
-          if (added === 0) appendLog(`  ✗ 頁 ${page}：${e.message}`, 'err');
-          if (consecutiveMiss >= MAX_MISS) break; // 連續 miss → 書本結尾
+          if (consecutiveMiss >= MAX_MISS) break;
           page++;
           continue;
         }
       }
-
       if (ok) consecutiveMiss = 0;
-      donePages++;
-      if (hasFixedEnd) setProgress(donePages / totalPages);
-      else if (added && added % 20 === 0) appendLog(`  已下載 ${added} 頁…`);
+      done++;
+      if (hasFixedEnd) setProgress(done / totalPages);
+      else setProgress(null);
+      setStatus(chapters.length > 1
+        ? `下載中 ${ci + 1}/${chapters.length}：${shortName}（${added} 頁）`
+        : `下載中：${shortName}（${added} 頁）`);
       page++;
     }
 
     if (added === 0) {
-      appendLog(`✗ ${ch.name}：一頁都沒抓到，請檢查上方錯誤（403=Token 問題，404=頁碼起點問題）`, 'err');
+      appendLog(`${shortName}：無法取得頁面`, 'bk-err');
       continue;
     }
 
@@ -311,43 +382,163 @@ async function downloadChapters(chapters, filenameOverride = null) {
       const pdfBytes = await pdfDoc.save();
       const blob = new Blob([pdfBytes], { type: 'application/pdf' });
       const blobUrl = URL.createObjectURL(blob);
-      const filename = `${filenameOverride || ch.name}.pdf`;
+      // folder === undefined → use bookTitle as subfolder; '' → no subfolder
+      const dir = folder === undefined
+        ? (bookTitle ? sanitizeName(bookTitle) + '/' : '')
+        : (folder ? folder + '/' : '');
+      const filename = `${dir}${filenameOverride || ch.name}.pdf`;
       await chrome.downloads.download({ url: blobUrl, filename, saveAs: false });
-      URL.revokeObjectURL(blobUrl);
-      const status = errors ? `${errors} 頁失敗` : '完整';
-      appendLog(`✔ ${filename}（共 ${added} 頁，${status}）`, errors ? 'err' : 'ok');
-      const li = document.createElement('li');
-      li.innerHTML = `<span class="ok">✓ ${filename} 下載完成</span>`;
-      document.getElementById('pdf-list').appendChild(li);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+      okCount++;
+      appendLog(shortName, 'bk-ok');
     } catch (e) {
-      appendLog(`✗ ${ch.name} PDF 產生失敗：${e.message}`, 'err');
+      appendLog(`${shortName}：PDF 產生失敗`, 'bk-err');
     }
   }
 
   setProgress(1);
-  appendLog('全部完成。', 'ok');
+  setStatus(`完成，共 ${okCount} 個 PDF`);
+  await new Promise(r => setTimeout(r, 900));
 }
 
-// ---------- 整本下載 ----------
-document.getElementById('whole-dl-btn').addEventListener('click', async () => {
-  const title = document.getElementById('whole-title').value.trim() || 'ebook';
-  const endVal = document.getElementById('whole-end').value.trim();
-  const end = endVal ? parseInt(endVal, 10) : NaN;
+// ---------- Session storage 初始化 ----------
+chrome.storage.session.get(
+  ['capturedImages', 'bookTitle', 'downloadLink', 'downloadToken', 'estimatedTotal', 'tocNodes'],
+  (data) => {
+    if (data.capturedImages) {
+      capturedImages = data.capturedImages;
+      resolvedTemplate = null; // reset so next resolveTemplate picks up fresh URLs
+    }
+    if (data.bookTitle) {
+      bookTitle = data.bookTitle;
+      setUI('bk-whole-title', bookTitle);
+    }
+    if (data.estimatedTotal) {
+      const hintEl = document.getElementById('bk-whole-end-hint');
+      if (hintEl) { hintEl.textContent = `依閱讀進度估算：約 ${data.estimatedTotal} 頁`; hintEl.style.display = 'block'; }
+    }
+    if (data.downloadLink && data.downloadToken) {
+      downloadLink = data.downloadLink;
+      downloadToken = data.downloadToken;
+      detectTotalPages();
+    }
+    if (data.tocNodes && data.tocNodes.length > 0) {
+      applyTocNodes(data.tocNodes);
+    }
+  }
+);
 
-  const ch = isNaN(end)
-    ? { name: title, start: 1, end: NaN }   // 留空 → 下載到 404
-    : { name: title, start: 1, end };
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'session') return;
 
-  const btn = document.getElementById('whole-dl-btn');
-  btn.disabled = true;
-  await downloadChapters([ch], title);
-  btn.disabled = false;
+  if (changes.capturedImages) {
+    capturedImages = changes.capturedImages.newValue || {};
+    resolvedTemplate = null;
+  }
+  if (changes.bookTitle) {
+    bookTitle = changes.bookTitle.newValue;
+    setUI('bk-whole-title', bookTitle);
+  }
+  if (changes.estimatedTotal) {
+    const hintEl = document.getElementById('bk-whole-end-hint');
+    if (hintEl && !document.getElementById('bk-whole-end')?.dataset.userEdited) {
+      hintEl.textContent = `依閱讀進度估算：約 ${changes.estimatedTotal.newValue} 頁`;
+      hintEl.style.display = 'block';
+    }
+  }
+  if (changes.downloadLink || changes.downloadToken) {
+    const link = changes.downloadLink?.newValue || downloadLink;
+    const token = changes.downloadToken?.newValue || downloadToken;
+    if (link && token && !(downloadLink && downloadToken)) {
+      downloadLink = link;
+      downloadToken = token;
+      detectTotalPages();
+    } else {
+      if (changes.downloadLink) downloadLink = changes.downloadLink.newValue;
+      if (changes.downloadToken) downloadToken = changes.downloadToken.newValue;
+    }
+  }
+  if (changes.tocNodes) {
+    const nodes = changes.tocNodes.newValue;
+    if (nodes && nodes.length > 0) applyTocNodes(nodes);
+  }
 });
 
-// ---------- 分章節下載 ----------
-document.getElementById('chapter-dl-btn').addEventListener('click', async () => {
-  const btn = document.getElementById('chapter-dl-btn');
-  btn.disabled = true;
-  await downloadChapters(collectChapters());
-  btn.disabled = false;
+// ---------- DOM 就緒後初始化 UI ----------
+document.addEventListener('DOMContentLoaded', () => {
+  // Inject SVG icons into buttons
+  document.getElementById('bk-head-ic') && (document.querySelector('.bk-head-ic').innerHTML = icon('book', 18));
+  document.querySelector('.bk-head-ic').innerHTML = icon('book', 18);
+  document.getElementById('bk-whole-btn').innerHTML = icon('download', 18) + '下載整本 PDF';
+  document.getElementById('bk-dl-selected').innerHTML = icon('download', 18) + '下載所選章節';
+  document.getElementById('bk-add').innerHTML = icon('plus', 16) + '新增章節';
+  document.getElementById('bk-chapter-btn').innerHTML = icon('download', 18) + '下載手動章節';
+
+  // Mark user edits
+  ['bk-whole-title', 'bk-whole-end'].forEach(id => {
+    document.addEventListener('input', (e) => {
+      if (e.target.id === id) e.target.dataset.userEdited = '1';
+    });
+  });
+
+  // Segmented switch
+  const sw = document.getElementById('bk-switch');
+  sw.querySelectorAll('.bk-seg').forEach((btn, i) => {
+    btn.addEventListener('click', () => {
+      sw.dataset.active = String(i);
+      sw.querySelectorAll('.bk-seg').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.tab;
+      document.getElementById('bk-sec-whole').classList.toggle('active', tab === 'whole');
+      document.getElementById('bk-sec-chapter').classList.toggle('active', tab === 'chapter');
+    });
+  });
+
+  // Whole book download
+  document.getElementById('bk-whole-btn').addEventListener('click', () => {
+    const btn = document.getElementById('bk-whole-btn');
+    const title = document.getElementById('bk-whole-title').value.trim() || 'ebook';
+    const endVal = document.getElementById('bk-whole-end').value.trim();
+    const end = endVal ? parseInt(endVal, 10) : NaN;
+    const ch = isNaN(end) ? { name: title, start: 1, end: NaN } : { name: title, start: 1, end };
+    withProgress(btn, () => downloadChapters([ch], title, ''));
+  });
+
+  // TOC actions
+  document.getElementById('bk-toc-all').addEventListener('click', () => {
+    tocNodes.forEach((_, i) => tocSelected.add(i)); renderTocTree();
+  });
+  document.getElementById('bk-toc-none').addEventListener('click', () => {
+    tocSelected.clear(); renderTocTree();
+  });
+  document.getElementById('bk-toc-top').addEventListener('click', () => {
+    tocSelected.clear();
+    tocNodes.forEach((n, i) => { if (n.level === 0) tocSelected.add(i); });
+    renderTocTree();
+  });
+  document.getElementById('bk-toc-collapse').addEventListener('click', () => {
+    tocCollapsed.clear();
+    tocNodes.forEach((_, i) => { if (isParentNode(i)) tocCollapsed.add(i); });
+    renderTocTree();
+  });
+
+  // Download selected TOC chapters
+  document.getElementById('bk-dl-selected').addEventListener('click', () => {
+    const btn = document.getElementById('bk-dl-selected');
+    withProgress(btn, () => downloadSelectedToc());
+  });
+
+  // Manual chapter table
+  document.getElementById('bk-add').addEventListener('click', () => addChapterRow());
+
+  document.getElementById('bk-chapter-btn').addEventListener('click', () => {
+    const rows = document.querySelectorAll('#bk-tbody tr');
+    const chapters = Array.from(rows).map((tr, i) => ({
+      name: tr.querySelector('.bk-name').value.trim() || `chapter${i + 1}`,
+      start: parseInt(tr.querySelector('.bk-start').value, 10),
+      end: parseInt(tr.querySelector('.bk-end').value, 10),
+    })).filter(ch => !isNaN(ch.start) && !isNaN(ch.end) && ch.end >= ch.start);
+    const btn = document.getElementById('bk-chapter-btn');
+    withProgress(btn, () => downloadChapters(chapters));
+  });
 });
