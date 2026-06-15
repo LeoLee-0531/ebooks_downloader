@@ -32,7 +32,6 @@
   let apiToken = null;
   let apiBookTitle = null;
   let resolvedTemplate = null;
-  let detectingPages = false;
 
   // 目錄樹狀態
   let tocNodes = [];            // [{idx, li, name, indent, level}]
@@ -186,7 +185,7 @@
       });
       return;
     }
-    fallbackAnchor(url, filename);
+    fallbackAnchor(url, hasSubDir ? filename.replace(/\//g, '_') : filename);
   }
 
   function fallbackAnchor(url, filename) {
@@ -419,14 +418,6 @@
       );
       const info = data?.records?.[0]?.item_info;
       if (info?.c_title) { apiBookTitle = info.c_title; setUI('bk-whole-title', info.c_title); }
-      if (info?.percent > 0 && info?.last_loc) {
-        const m = info.last_loc.match(/\[p-(\d+)\]/);
-        if (m) {
-          const est = Math.round(parseInt(m[1], 10) / (info.percent / 100));
-          const hintEl = document.getElementById('bk-whole-end-hint');
-          if (hintEl) { hintEl.textContent = `約 ${est} 頁（偵測中…）`; hintEl.style.display = 'block'; }
-        }
-      }
     } catch (_) {}
 
     // 下載連結與 Token
@@ -437,35 +428,8 @@
       if (data.download_link && data.download_token) {
         apiLink = data.download_link;
         apiToken = data.download_token;
-        detectTotalPages();
       }
     } catch (_) {}
-  }
-
-  async function detectTotalPages() {
-    if (detectingPages) return;
-    detectingPages = true;
-
-    const hintEl = document.getElementById('bk-whole-end-hint');
-    if (hintEl) { hintEl.textContent = '自動偵測中…'; hintEl.style.display = 'block'; }
-
-    try {
-      const template = await resolveTemplate();
-      if (!template) return;
-      // Binary search ~14 次請求
-      let low = 1, high = 9999;
-      while (low < high) {
-        const mid = Math.floor((low + high + 1) / 2);
-        if (await checkPageExists(getPageUrl(template, mid))) low = mid;
-        else high = mid - 1;
-      }
-      setUI('bk-whole-end', String(low));
-      if (hintEl) hintEl.textContent = `自動偵測：共 ${low} 頁`;
-    } catch (_) {
-      if (hintEl) hintEl.textContent = '偵測失敗，請手動輸入';
-    } finally {
-      detectingPages = false;
-    }
   }
 
   function setUI(id, value) {
@@ -617,19 +581,18 @@
       try {
         const pdfBytes = await pdfDoc.save();
         // folder === undefined → 預設用書名建一層資料夾；傳 '' 則不建
-        const dir = folder === undefined ? (apiBookTitle ? sanitizeName(apiBookTitle) + '/' : '') : (folder ? folder + '/' : '');
+        const uiTitle = (document.getElementById('bk-whole-title') || {}).value?.trim() || '';
+        const bookTitle = uiTitle || apiBookTitle || '';
+        const dir = folder === undefined ? (bookTitle ? sanitizeName(bookTitle) + '/' : '') : (folder ? folder + '/' : '');
         const fname = `${dir}${filenameOverride || ch.name}.pdf`;
         downloadPdf(pdfBytes, fname);
         okCount++;
-        appendLog(shortName, 'bk-ok');
       } catch (e) {
         appendLog(`${shortName}：PDF 產生失敗`, 'bk-err');
       }
     }
 
     setProgress(1);
-    setStatus(`完成，共 ${okCount} 個 PDF`);
-    await new Promise(r => setTimeout(r, 900));
   }
 
   function addChapterRow(name = '', start = '', end = '') {
@@ -740,7 +703,7 @@
       #bk-status{font-size:13px;color:#374151;margin-top:8px;text-align:center;
         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       /* log */
-      #bk-log{margin-top:12px;max-height:130px;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+      #bk-log{margin-top:12px;display:flex;flex-direction:column;gap:3px}
       #bk-log:empty{display:none}
       .bk-line{display:flex;align-items:center;gap:6px;font-size:13px;color:#374151;
         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -885,6 +848,9 @@
     if (apiBookTitle) setUI('bk-whole-title', apiBookTitle);
 
     document.getElementById('bk-add').addEventListener('click', () => addChapterRow());
+    document.querySelector('.bk-adv').addEventListener('toggle', function () {
+      if (this.open && !document.getElementById('bk-tbody').children.length) addChapterRow();
+    });
 
     document.getElementById('bk-whole-btn').addEventListener('click', () => {
       const btn = document.getElementById('bk-whole-btn');
