@@ -9,7 +9,11 @@
 ### Tampermonkey 腳本
 
 1. 安裝 [Tampermonkey](https://www.tampermonkey.net/)
-2. 前往 [Greasy Fork](https://greasyfork.org/zh-TW/scripts/582667-%E5%8D%9A%E5%AE%A2%E4%BE%86%E9%9B%BB%E5%AD%90%E6%9B%B8%E4%B8%8B%E8%BC%89%E5%B7%A5%E5%85%B7) 點「安裝此腳本」
+2. 開啟 `chrome://extensions`（或 `edge://extensions`）
+3. 右上角開啟「**開發人員模式**」
+4. 找到 `篡改猴` 點擊 `詳細資料` 按鈕
+5. 開啟 `允許使用者指令碼`
+3. 前往 [Greasy Fork](https://greasyfork.org/zh-TW/scripts/582667-%E5%8D%9A%E5%AE%A2%E4%BE%86%E9%9B%BB%E5%AD%90%E6%9B%B8%E4%B8%8B%E8%BC%89%E5%B7%A5%E5%85%B7) 點「安裝此腳本」
 
 ### Chrome 擴充套件
 
