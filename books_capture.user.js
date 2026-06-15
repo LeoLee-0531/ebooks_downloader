@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         博客來電子書下載工具
 // @namespace    https://github.com/local/ebooks-downloader
-// @version      5.0.0
+// @version      1.1.0
 // @description  在博客來電子書閱讀器直接下載圖片並合併成 PDF，無需安裝其他工具
 // @author       https://leo-lee.dev
+// @license      MIT
 // @match        *://*.books.com.tw/*
 // @connect      streaming-ebook.books.com.tw
 // @connect      appapi-ebook.books.com.tw
